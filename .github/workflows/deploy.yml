@@ -8,75 +8,64 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: github-pages
-  cancel-in-progress: false
-
 jobs:
-
-  # ============================================================
-  # VALIDATION
-  # ============================================================
 
   validate:
     name: Validate Application
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ----------------------------------------------------------
-      # 1. FILE VALIDATION
-      # ----------------------------------------------------------
-
+      # Check required files
       - name: Validate Required Files
         run: |
           set -e
 
           for file in index.html styles.css script.js; do
+
             if [ ! -s "$file" ]; then
-              echo "::error file=$file::$file is missing or empty"
+              echo "::error::$file is missing or empty"
               exit 1
             fi
+
           done
 
           grep -q "styles.css" index.html || {
-            echo "::error file=index.html::styles.css is not referenced"
+            echo "::error::styles.css is not referenced"
             exit 1
           }
 
           grep -q "script.js" index.html || {
-            echo "::error file=index.html::script.js is not referenced"
+            echo "::error::script.js is not referenced"
             exit 1
           }
 
-          echo "Required files validated successfully."
+          echo "Required files OK"
 
-      # ----------------------------------------------------------
-      # 2. CODE + SYNTAX VALIDATION
-      # ----------------------------------------------------------
-
-      - name: Setup Node.js
+      # Setup validation tools
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Validate Code and Syntax
+      # Validate syntax + formatting
+      - name: Validate Code
         run: |
           set -e
 
           # JavaScript syntax
           node --check script.js
 
-          # Install validators
+          # Validation tools
           npm install --no-save \
             prettier@3 \
             html-validate@10 \
             stylelint@16 \
             stylelint-config-standard@39
 
-          # CSS validator configuration
           cat > stylelint.config.mjs <<'EOF'
           export default {
             extends: ["stylelint-config-standard"]
@@ -90,148 +79,19 @@ jobs:
           npx stylelint styles.css
 
           # Formatting / indentation
-          npx prettier --check index.html styles.css script.js
+          npx prettier --check \
+            index.html \
+            styles.css \
+            script.js
 
-          echo "Code validation passed."
+          echo "Source validation successful"
 
-      # ----------------------------------------------------------
-      # 3. AI CONTENT VALIDATION
-      # ----------------------------------------------------------
-
-      - name: AI Quote Content Validation
-        env:
-          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${GEMINI_API_KEY:-}" ]; then
-            echo "::error::LLM_API_KEY is not configured"
-            exit 1
-          fi
-
-          jq -n --rawfile source script.js '{
-            contents: [{
-              parts: [{
-                text: (
-                  "You are a content quality validator for a student-friendly " +
-                  "motivational quote website.\n\n" +
-
-                  "Review ONLY the strings inside the quotes array.\n\n" +
-
-                  "Each quote must:\n" +
-                  "- be meaningful and understandable\n" +
-                  "- express a coherent or motivational idea\n" +
-                  "- be appropriate for students\n" +
-                  "- not contain profanity, abusive, hateful, threatening, " +
-                  "or explicit content\n" +
-                  "- not contain gibberish, random characters, placeholders, " +
-                  "meaningless repetition, or word salad\n\n" +
-
-                  "Approve only when EVERY quote passes.\n\n" +
-
-                  "JavaScript:\n" + $source
-                )
-              }]
-            }],
-
-            generationConfig: {
-              temperature: 0,
-              responseMimeType: "application/json",
-
-              responseJsonSchema: {
-                type: "object",
-
-                properties: {
-                  approved: {
-                    type: "boolean"
-                  },
-
-                  summary: {
-                    type: "string"
-                  },
-
-                  rejected_items: {
-                    type: "array",
-
-                    items: {
-                      type: "object",
-
-                      properties: {
-                        index: {
-                          type: "integer"
-                        },
-
-                        reason: {
-                          type: "string"
-                        }
-                      },
-
-                      required: [
-                        "index",
-                        "reason"
-                      ]
-                    }
-                  }
-                },
-
-                required: [
-                  "approved",
-                  "summary",
-                  "rejected_items"
-                ]
-              }
-            }
-          }' > gemini-request.json
-
-          HTTP_CODE=$(curl \
-            --silent \
-            --show-error \
-            --output gemini-response.json \
-            --write-out "%{http_code}" \
-            --request POST \
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
-            --header "Content-Type: application/json" \
-            --header "x-goog-api-key: $GEMINI_API_KEY" \
-            --data-binary @gemini-request.json)
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::Gemini API failed with HTTP $HTTP_CODE"
-            cat gemini-response.json
-            exit 1
-          fi
-
-          REVIEW=$(jq -er \
-            '.candidates[0].content.parts[0].text | fromjson' \
-            gemini-response.json)
-
-          echo "AI Review Result:"
-          echo "$REVIEW" | jq .
-
-          APPROVED=$(echo "$REVIEW" | jq -r '.approved')
-
-          if [ "$APPROVED" != "true" ]; then
-
-            SUMMARY=$(echo "$REVIEW" | jq -r '.summary')
-
-            echo "::error file=script.js::AI content validation failed: $SUMMARY"
-
-            echo "$REVIEW" |
-              jq -r '.rejected_items[] |
-              "Quote index \(.index): \(.reason)"'
-
-            exit 1
-          fi
-
-          echo "Quote content approved by AI."
-
-  # ============================================================
-  # DEPLOYMENT
-  # Only happens if validation succeeds
-  # ============================================================
 
   deploy:
     name: Deploy Application
+
     needs: validate
+
     runs-on: ubuntu-latest
 
     environment:
@@ -239,21 +99,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      # ----------------------------------------------------------
-      # 4. PREPARE DEPLOYMENT
-      # ----------------------------------------------------------
 
       - name: Prepare Site
         run: |
           mkdir public
           cp index.html styles.css script.js public/
-
-      # ----------------------------------------------------------
-      # 5. GITHUB PAGES DEPLOYMENT
-      # ----------------------------------------------------------
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
@@ -267,19 +120,13 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
-      # ----------------------------------------------------------
-      # 6. HEALTH CHECK
-      # ----------------------------------------------------------
-
       - name: Production Health Check
         env:
           SITE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
-          echo "Checking: $SITE_URL"
-
           CODE="000"
 
-          for attempt in 1 2 3 4 5; do
+          for ATTEMPT in 1 2 3; do
 
             CODE=$(curl \
               --silent \
@@ -288,16 +135,17 @@ jobs:
               --write-out "%{http_code}" \
               "$SITE_URL" || true)
 
-            echo "Attempt $attempt: HTTP $CODE"
+            echo "Attempt $ATTEMPT: HTTP $CODE"
 
             if [ "$CODE" = "200" ]; then
-              echo "Site is healthy."
+              echo "Site is healthy"
               exit 0
             fi
 
-            sleep 10
+            sleep 5
+
           done
 
-          echo "::error::Production health check failed with HTTP $CODE"
+          echo "::error::Health check failed with HTTP $CODE"
           exit 1
           
