@@ -77,6 +77,13 @@ value:
 <YOUR GEMINI API KEY>
 
 get api from gemini by signing in with your gmail
+Go to Google AI Studio: Navigate to aistudio.google.com in your web browser.
+
+Sign In: Log in using your Google account credentials.
+
+Navigate to API Keys: On the left-hand navigation menu, click on Get API key (or click the API Keys section).
+
+Create a New Key: Click the Create API key button.
 ---------------------+++++----------------
 GitHub Actions Permissions
 The AI self-healing workflow needs permission to:
