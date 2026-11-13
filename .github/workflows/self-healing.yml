@@ -187,6 +187,8 @@ jobs:
           FAILED_RUN: ${{ github.event.workflow_run.html_url }}
 
         run: |
+          rm -rf gemini-artifacts
+          rm -rf failure-context.txt
 
           git config user.name "gemini-self-heal[bot]"
 
