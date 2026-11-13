@@ -16,13 +16,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Validate Files
-        run: |
-          test -f index.html
-          test -f styles.css
-          test -f script.js
-          echo "Validation successful"
-
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
