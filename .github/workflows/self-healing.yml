@@ -10,6 +10,10 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: self-heal-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
+
 jobs:
   repair:
     name: Diagnose and Repair
@@ -19,12 +23,12 @@ jobs:
       github.event.workflow_run.head_branch == 'self-healing'
 
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 7
 
     steps:
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
       # 1. Checkout the exact commit that failed
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
 
       - name: Checkout Failed Revision
         uses: actions/checkout@v4
@@ -32,9 +36,9 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      # ----------------------------------------------------------
-      # 2. Create fix branch BEFORE Gemini runs
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 2. Create fix branch BEFORE Gemini
+      # --------------------------------------------------------
 
       - name: Create Fix Branch
         id: branch
@@ -49,47 +53,107 @@ jobs:
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "Created fix branch: $BRANCH"
 
-      # ----------------------------------------------------------
-      # 3. Collect failed logs and recent changes
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 3. Collect only useful failure information
+      # --------------------------------------------------------
 
       - name: Collect Failure Context
         env:
           GH_TOKEN: ${{ github.token }}
           FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
-          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
         shell: bash
         run: |
           set -euo pipefail
 
           {
-            echo "# Deployment Failure Context"
+            echo "# Failed checks"
+
+            gh run view "$FAILED_RUN_ID" \
+              --log-failed 2>&1 |
+              tail -n 150 || true
+
             echo
-            echo "Failed run: $FAILED_RUN_URL"
-            echo
-            echo "## Failed Workflow Logs"
-            gh run view "$FAILED_RUN_ID" --log-failed || true
-            echo
-            echo "## Latest Commit"
-            git show --stat --oneline HEAD
-            echo
-            echo "## Changed Files"
+            echo "# Changed files"
+
             git diff --name-status HEAD^ HEAD || true
+
             echo
-            echo "## Latest Changes"
-            git diff HEAD^ HEAD || true
+            echo "# Recent application changes"
+
+            git diff HEAD^ HEAD -- \
+              index.html \
+              indx.html \
+              styles.css \
+              script.js || true
+
           } > failure-context.txt
 
           cat failure-context.txt
 
-      # ----------------------------------------------------------
-      # 4. Gemini diagnoses and modifies the fix branch
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 4. Fail quickly if Gemini API is unavailable
+      # --------------------------------------------------------
+
+      - name: Test Gemini API
+        env:
+          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GEMINI_API_KEY:-}" ]; then
+            echo "::error::LLM_API_KEY is not configured."
+            exit 1
+          fi
+
+          HTTP_CODE=$(curl \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --output gemini-test.json \
+            --write-out "%{http_code}" \
+            --request POST \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
+            --header "Content-Type: application/json" \
+            --header "x-goog-api-key: $GEMINI_API_KEY" \
+            --data '{
+              "contents": [{
+                "parts": [{
+                  "text": "Reply with exactly READY"
+                }]
+              }]
+            }')
+
+          echo "Gemini API status: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Gemini API preflight failed."
+
+            jq . gemini-test.json ||
+              cat gemini-test.json
+
+            exit 1
+          fi
+
+          RESPONSE=$(jq -r \
+            '.candidates[0].content.parts[0].text' \
+            gemini-test.json)
+
+          echo "Gemini response: $RESPONSE"
+
+          rm -f gemini-test.json
+
+      # --------------------------------------------------------
+      # 5. Let Gemini make one focused repair
+      # --------------------------------------------------------
 
       - name: Diagnose and Repair With Gemini
         env:
           GEMINI_CLI_TRUST_WORKSPACE: "true"
+
         uses: google-github-actions/run-gemini-cli@v0
+
         with:
           gemini_api_key: ${{ secrets.LLM_API_KEY }}
           gemini_model: gemini-3.8-flash
@@ -97,56 +161,58 @@ jobs:
           settings: |
             {
               "general": {
-                "defaultApprovalMode": "auto_edit"
+                "defaultApprovalMode": "auto_edit",
+                "maxAttempts": 1,
+                "retryFetchErrors": false,
+                "enableAutoUpdate": false
               }
             }
 
           prompt: |
-            Act as a cautious self-healing coding agent.
+            Repair this small static GitHub Pages application.
 
-            Read:
+            Read only these files when present:
+
             - failure-context.txt
             - GEMINI.md
-            - all relevant repository files
-
-            Inspect the failed workflow logs, recent Git changes and current
-            application source. Determine the actual cause of the failure.
-
-            Apply the smallest safe repair directly to the working tree.
-
-            This is a static GitHub Pages quote-generator application using:
-
             - index.html
+            - indx.html
             - styles.css
             - script.js
 
-            Possible failures include:
+            Use the failed logs and Git diff in failure-context.txt to identify
+            the actual root cause.
 
-            - required files renamed, missing, deleted or empty
+            Possible problems include:
+
+            - required files missing or renamed
             - broken HTML references
-            - invalid HTML
-            - invalid CSS
-            - JavaScript syntax errors
-            - formatting or indentation failures
-            - unsuitable, meaningless or non-motivational quotes
-            - failed deployment health checks
+            - invalid HTML, CSS or JavaScript
+            - formatting or indentation problems
+            - unsuitable or meaningless quotes
+            - failed health checks
 
-            Requirements:
+            Modify only the application files required for the smallest safe
+            repair.
 
-            - Apply the repair instead of only explaining it.
-            - Preserve the application's intended appearance and behaviour.
-            - Preserve valid application content.
-            - Make only the changes necessary to repair the failure.
-            - Never modify anything inside .github/workflows/.
-            - Never remove, weaken or bypass validation.
-            - Never expose credentials or secrets.
-            - Never commit, push or create a pull request.
-            - Do not delete unrelated files or functionality.
+            Rules:
+
+            - Apply the repair; do not only explain it.
+            - Preserve valid appearance, behaviour and content.
+            - Do not inspect unrelated files or directories.
+            - Do not modify anything under .github/.
+            - Do not weaken validation.
+            - Do not install packages.
+            - Do not run validation commands.
+            - Do not expose secrets.
+            - Do not commit, push or create a pull request.
+            - Make one repair attempt.
+            - After editing the required files, stop.
             - If a safe repair cannot be determined, leave files unchanged.
 
-      # ----------------------------------------------------------
-      # 5. Protect GitHub Actions workflow files
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 6. Protect workflow files
+      # --------------------------------------------------------
 
       - name: Protect Workflow Files
         shell: bash
@@ -164,9 +230,9 @@ jobs:
 
           echo "Workflow files were not modified."
 
-      # ----------------------------------------------------------
-      # 6. Remove diagnostic file and check for a repair
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 7. Confirm Gemini produced a repair
+      # --------------------------------------------------------
 
       - name: Verify Repair Was Produced
         shell: bash
@@ -174,20 +240,21 @@ jobs:
           set -euo pipefail
 
           rm -f failure-context.txt
+          rm -f gemini-test.json
 
-          echo "Proposed repair:"
+          echo "Proposed changes:"
           git status --short
           git diff --stat
           git diff
 
-          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+          if [ -z "$(git status --porcelain)" ]; then
             echo "::error::Gemini did not produce a repair."
             exit 1
           fi
 
-      # ----------------------------------------------------------
-      # 7. Validate required application files
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 8. Validate required files
+      # --------------------------------------------------------
 
       - name: Validate Required Files
         shell: bash
@@ -213,9 +280,9 @@ jobs:
 
           echo "Required file validation passed."
 
-      # ----------------------------------------------------------
-      # 8. Validate repaired HTML, CSS, JS and formatting
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 9. Validate HTML, CSS, JavaScript and formatting
+      # --------------------------------------------------------
 
       - name: Validate Repaired Code
         shell: bash
@@ -238,7 +305,10 @@ jobs:
 
           npx html-validate index.html
           npx stylelint styles.css
-          npx prettier --check index.html styles.css script.js
+          npx prettier --check \
+            index.html \
+            styles.css \
+            script.js
 
           rm -rf \
             node_modules \
@@ -248,9 +318,104 @@ jobs:
 
           echo "Technical validation passed."
 
-      # ----------------------------------------------------------
-      # 9. Commit and push repair branch
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 10. Recheck repaired quote content
+      # --------------------------------------------------------
+
+      - name: Validate Repaired Quote Content
+        env:
+          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -n \
+            --rawfile source script.js \
+            '{
+              contents: [{
+                parts: [{
+                  text: (
+                    "Review only the strings inside the quotes array.\n" +
+                    "Every quote must be meaningful, understandable, " +
+                    "motivational and appropriate for students.\n" +
+                    "Reject profanity, abuse, hate, threats, explicit content, " +
+                    "gibberish, placeholders, random characters, meaningless " +
+                    "repetition and word salad.\n" +
+                    "Reply with approved=true only if every quote passes.\n\n" +
+                    $source
+                  )
+                }]
+              }],
+
+              generationConfig: {
+                temperature: 0,
+                responseMimeType: "application/json",
+
+                responseJsonSchema: {
+                  type: "object",
+
+                  properties: {
+                    approved: {
+                      type: "boolean"
+                    },
+
+                    summary: {
+                      type: "string"
+                    }
+                  },
+
+                  required: [
+                    "approved",
+                    "summary"
+                  ]
+                }
+              }
+            }' > content-request.json
+
+          HTTP_CODE=$(curl \
+            --silent \
+            --show-error \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --output content-response.json \
+            --write-out "%{http_code}" \
+            --request POST \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
+            --header "Content-Type: application/json" \
+            --header "x-goog-api-key: $GEMINI_API_KEY" \
+            --data-binary @content-request.json)
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Quote validation API failed with HTTP $HTTP_CODE."
+
+            jq . content-response.json ||
+              cat content-response.json
+
+            exit 1
+          fi
+
+          REVIEW=$(jq -er \
+            '.candidates[0].content.parts[0].text | fromjson' \
+            content-response.json)
+
+          echo "$REVIEW" | jq .
+
+          if [ "$(echo "$REVIEW" | jq -r '.approved')" != "true" ]; then
+            SUMMARY=$(echo "$REVIEW" | jq -r '.summary')
+
+            echo "::error file=script.js::Quote validation failed: $SUMMARY"
+            exit 1
+          fi
+
+          rm -f \
+            content-request.json \
+            content-response.json
+
+          echo "Quote content validation passed."
+
+      # --------------------------------------------------------
+      # 11. Commit and push the validated repair
+      # --------------------------------------------------------
 
       - name: Commit and Push Repair
         env:
@@ -258,6 +423,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          rm -f \
+            failure-context.txt \
+            gemini-test.json \
+            content-request.json \
+            content-response.json
 
           git config user.name "gemini-self-heal[bot]"
           git config user.email \
@@ -276,9 +447,9 @@ jobs:
           git push \
             --set-upstream origin "$BRANCH"
 
-      # ----------------------------------------------------------
-      # 10. Raise PR against self-healing
-      # ----------------------------------------------------------
+      # --------------------------------------------------------
+      # 12. Create PR against self-healing
+      # --------------------------------------------------------
 
       - name: Create Pull Request
         env:
@@ -296,26 +467,24 @@ jobs:
             --body-file - <<EOF
           ## AI-generated repair
 
-          Gemini inspected the failed deployment logs, recent repository
-          changes and application files.
+          Gemini analysed the failed workflow and applied a focused repair on
+          an isolated branch.
 
-          The proposed repair was created on an isolated branch before Gemini
-          modified any files.
+          Automated verification completed:
 
-          ### Automated checks completed
-
-          - Required application files exist and are not empty
+          - Required files exist and are not empty
           - HTML references CSS and JavaScript
-          - JavaScript syntax validation passes
+          - JavaScript syntax passes
           - HTML validation passes
           - CSS validation passes
           - Formatting validation passes
-          - GitHub Actions workflow files were not modified
+          - Quote content validation passes
+          - Workflow files were not modified
 
           Failed deployment:
 
           $FAILED_RUN_URL
 
-          Please review the generated changes before merging.
+          Please review the proposed changes before merging.
           EOF
           
