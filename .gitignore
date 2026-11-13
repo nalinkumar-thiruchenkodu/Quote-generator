@@ -1,11 +1,10 @@
-# Gemini CLI
+# Gemini CLI runtime files
 .gemini/
+gemini-artifacts/
 gha-creds-*.json
 
-# AI temporary files
+# Self-healing temporary files
 failure-context.txt
-gemini-request.json
-gemini-response.json
 
-# Node validation dependencies
+# Validation dependencies
 node_modules/
