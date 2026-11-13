@@ -116,3 +116,19 @@ Push repair branch
 ↓
 Create Pull Request
 
+### Your repository should finally look like
+
+```text
+quote-generator/
+├── index.html
+├── styles.css
+├── script.js
+├── README.md
+├── GEMINI.md
+├── .gitignore
+└── .github/
+    └── workflows/
+        ├── deploy.yml
+        └── self-heal.yml
+
+
