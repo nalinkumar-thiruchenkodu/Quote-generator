@@ -11,7 +11,9 @@ permissions:
   pull-requests: write
 
 jobs:
+
   repair:
+
     if: >
       github.event.workflow_run.conclusion == 'failure' &&
       github.event.workflow_run.head_branch == 'self-healing'
@@ -21,99 +23,66 @@ jobs:
 
     steps:
 
-      # 1. Checkout exact failed code
+      # Checkout exact failed version
       - name: Checkout Failed Revision
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 2
 
-      # 2. Create fix branch BEFORE Gemini
+
+      # Create fix branch BEFORE Gemini
       - name: Create Fix Branch
         id: branch
         run: |
+
           BRANCH="ai-fix-${{ github.event.workflow_run.id }}-${{ github.run_attempt }}"
+
           git switch -c "$BRANCH"
+
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      # 3. Collect failure logs + recent changes
+
+      # Give Gemini failure information
       - name: Collect Failure Context
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
+
         run: |
+
           {
             echo "FAILED WORKFLOW:"
-            gh run view "$RUN_ID" --log-failed 2>&1 | tail -n 100 || true
+
+            gh run view "$RUN_ID" \
+              --log-failed 2>&1 |
+              tail -n 100 || true
 
             echo
+
             echo "RECENT CHANGES:"
+
             git diff HEAD^ HEAD -- \
-              index.html indx.html styles.css script.js || true
+              index.html \
+              indx.html \
+              styles.css \
+              script.js || true
+
           } > failure-context.txt
 
-      # 4. Check Gemini availability with short retries
-      - name: Test Gemini API
-        env:
-          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
-        run: |
-          set -euo pipefail
 
-          for ATTEMPT in 1 2 3; do
-
-            HTTP_CODE=$(curl \
-              --silent \
-              --show-error \
-              --connect-timeout 10 \
-              --max-time 30 \
-              --output gemini-test.json \
-              --write-out "%{http_code}" \
-              --request POST \
-              "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
-              --header "Content-Type: application/json" \
-              --header "x-goog-api-key: $GEMINI_API_KEY" \
-              --data '{
-                "contents": [{
-                  "parts": [{
-                    "text": "Reply READY"
-                  }]
-                }]
-              }')
-
-            echo "Attempt $ATTEMPT: HTTP $HTTP_CODE"
-
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "Gemini API ready."
-              rm -f gemini-test.json
-              break
-            fi
-
-            if [ "$HTTP_CODE" = "429" ] || [ "$HTTP_CODE" = "503" ]; then
-              echo "Temporary Gemini API issue. Retrying..."
-
-              if [ "$ATTEMPT" = "3" ]; then
-                cat gemini-test.json
-                exit 1
-              fi
-
-              sleep $((ATTEMPT * 3))
-              continue
-            fi
-
-            cat gemini-test.json
-            exit 1
-
-          done
-
-      # 5. Gemini diagnoses and repairs
+      # AI repair
       - name: Diagnose and Repair With Gemini
+
         env:
           GEMINI_CLI_TRUST_WORKSPACE: "true"
 
         uses: google-github-actions/run-gemini-cli@v0
 
         with:
+
           gemini_api_key: ${{ secrets.LLM_API_KEY }}
+
           gemini_model: gemini-3.8-flash
 
           settings: |
@@ -127,75 +96,100 @@ jobs:
             }
 
           prompt: |
+
             Repair this small static GitHub Pages application.
 
             Read failure-context.txt and inspect only:
-            index.html, indx.html, styles.css, script.js and GEMINI.md.
 
-            Determine why the deployment failed and make the smallest
-            necessary repair.
+            - index.html
+            - indx.html
+            - styles.css
+            - script.js
+            - GEMINI.md
 
-            Possible failures include missing/renamed files, broken references,
-            HTML/CSS/JavaScript syntax errors, formatting problems,
-            unsuitable quotes or meaningless quote content.
+            Determine why the deployment failed.
+
+            Make the smallest necessary repair.
+
+            Possible failures include:
+
+            - missing or renamed files
+            - broken references
+            - HTML syntax errors
+            - CSS syntax errors
+            - JavaScript syntax errors
+            - formatting problems
+            - indentation problems
 
             Rules:
-            - Apply the fix, do not only explain it.
-            - Preserve valid behaviour and content.
+
+            - Apply the fix.
+            - Do not only explain it.
             - Do not modify .github/.
             - Do not weaken validation.
             - Do not install packages.
-            - Do not run validation.
-            - Do not commit, push or create a PR.
+            - Do not commit or push.
+            - Do not create a PR.
             - Make one repair attempt and stop.
 
-      # 6. Validate Gemini repair
+
+      # Basic verification
       - name: Validate AI Repair
+
         run: |
-          set -euo pipefail
 
-          rm -f failure-context.txt gemini-test.json
+          set -e
 
-          # Never allow AI to change workflows
+          rm -f failure-context.txt
+
+          # Protect workflow files
           git diff --quiet -- .github/workflows || {
             git restore .github/workflows
-            echo "AI attempted to modify workflow files."
+            echo "AI modified workflow files"
             exit 1
           }
 
-          # AI must actually change something
+          # AI must have changed something
           [ -n "$(git status --porcelain)" ] || {
-            echo "AI produced no repair."
+            echo "AI produced no repair"
             exit 1
           }
 
           # Required application files
           for file in index.html styles.css script.js; do
+
             test -s "$file" || {
-              echo "$file is missing or empty."
+              echo "$file missing"
               exit 1
             }
+
           done
 
-          # Required HTML references
+          # References
           grep -q "styles.css" index.html
           grep -q "script.js" index.html
 
           # JavaScript syntax
           node --check script.js
 
-          echo "AI repair passed basic validation."
+          echo "AI repair passed basic validation"
 
-      # 7. Commit fix + push + PR
+
+      # Commit + push + PR
       - name: Create Repair Pull Request
+
         env:
+
           GH_TOKEN: ${{ github.token }}
+
           BRANCH: ${{ steps.branch.outputs.name }}
+
           FAILED_RUN: ${{ github.event.workflow_run.html_url }}
+
         run: |
-          set -euo pipefail
 
           git config user.name "gemini-self-heal[bot]"
+
           git config user.email \
             "gemini-self-heal[bot]@users.noreply.github.com"
 
@@ -211,8 +205,6 @@ jobs:
             --head "$BRANCH" \
             --title "AI Self Heal: Repair failed deployment" \
             --body "Gemini analysed the failure and generated this repair.
-
-          Basic validation passed.
 
           Failed deployment:
           $FAILED_RUN"
