@@ -12,41 +12,81 @@ permissions:
 
 jobs:
   repair:
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    name: Diagnose and Repair
+
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'self-healing'
+
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
+      # ----------------------------------------------------------
+      # 1. Checkout the exact commit that failed
+      # ----------------------------------------------------------
+
       - name: Checkout Failed Revision
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - name: Create Repair Branch
+      # ----------------------------------------------------------
+      # 2. Create fix branch BEFORE Gemini runs
+      # ----------------------------------------------------------
+
+      - name: Create Fix Branch
         id: branch
+        shell: bash
         run: |
+          set -euo pipefail
+
           BRANCH="ai-fix-${{ github.event.workflow_run.id }}-${{ github.run_attempt }}"
+
           git switch -c "$BRANCH"
+
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Created fix branch: $BRANCH"
+
+      # ----------------------------------------------------------
+      # 3. Collect failed logs and recent changes
+      # ----------------------------------------------------------
 
       - name: Collect Failure Context
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+        shell: bash
         run: |
-          {
-            echo "## Failed Workflow Logs"
-            gh run view "$RUN_ID" --log-failed || true
+          set -euo pipefail
 
+          {
+            echo "# Deployment Failure Context"
+            echo
+            echo "Failed run: $FAILED_RUN_URL"
+            echo
+            echo "## Failed Workflow Logs"
+            gh run view "$FAILED_RUN_ID" --log-failed || true
+            echo
             echo "## Latest Commit"
             git show --stat --oneline HEAD
-
+            echo
+            echo "## Changed Files"
+            git diff --name-status HEAD^ HEAD || true
+            echo
             echo "## Latest Changes"
             git diff HEAD^ HEAD || true
           } > failure-context.txt
 
-      - name: Repair With Gemini
+          cat failure-context.txt
+
+      # ----------------------------------------------------------
+      # 4. Gemini diagnoses and modifies the fix branch
+      # ----------------------------------------------------------
+
+      - name: Diagnose and Repair With Gemini
         uses: google-github-actions/run-gemini-cli@v0
         with:
           gemini_api_key: ${{ secrets.LLM_API_KEY }}
@@ -62,59 +102,123 @@ jobs:
           prompt: |
             Act as a cautious self-healing coding agent.
 
-            Read failure-context.txt, GEMINI.md and inspect the repository.
+            Read:
+            - failure-context.txt
+            - GEMINI.md
+            - all relevant repository files
 
-            Find the actual reason the deployment failed and apply the
-            smallest safe repair directly to the working tree.
+            Inspect the failed workflow logs, recent Git changes and current
+            application source. Determine the actual cause of the failure.
 
-            The project is a static quote website using:
+            Apply the smallest safe repair directly to the working tree.
+
+            This is a static GitHub Pages quote-generator application using:
+
             - index.html
             - styles.css
             - script.js
 
-            Failures may include:
-            - missing or renamed files
+            Possible failures include:
+
+            - required files renamed, missing, deleted or empty
+            - broken HTML references
             - invalid HTML
             - invalid CSS
             - JavaScript syntax errors
-            - formatting problems
-            - broken file references
-            - unsuitable or meaningless quotes
-            - failed health checks
+            - formatting or indentation failures
+            - unsuitable, meaningless or non-motivational quotes
+            - failed deployment health checks
 
-            Rules:
-            - Apply the fix; do not only explain it.
-            - Preserve valid behaviour, appearance and content.
-            - Never modify .github/workflows/.
-            - Never weaken validation.
-            - Never expose secrets.
-            - Do not commit, push or create a pull request.
-            - If a safe fix cannot be determined, leave files unchanged.
+            Requirements:
 
-      - name: Validate Proposed Repair
+            - Apply the repair instead of only explaining it.
+            - Preserve the application's intended appearance and behaviour.
+            - Preserve valid application content.
+            - Make only the changes necessary to repair the failure.
+            - Never modify anything inside .github/workflows/.
+            - Never remove, weaken or bypass validation.
+            - Never expose credentials or secrets.
+            - Never commit, push or create a pull request.
+            - Do not delete unrelated files or functionality.
+            - If a safe repair cannot be determined, leave files unchanged.
+
+      # ----------------------------------------------------------
+      # 5. Protect GitHub Actions workflow files
+      # ----------------------------------------------------------
+
+      - name: Protect Workflow Files
+        shell: bash
         run: |
+          set -euo pipefail
+
+          if ! git diff --quiet -- .github/workflows; then
+            echo "::error::Gemini attempted to modify workflow files."
+
+            git diff -- .github/workflows
+            git restore .github/workflows
+
+            exit 1
+          fi
+
+          echo "Workflow files were not modified."
+
+      # ----------------------------------------------------------
+      # 6. Remove diagnostic file and check for a repair
+      # ----------------------------------------------------------
+
+      - name: Verify Repair Was Produced
+        shell: bash
+        run: |
+          set -euo pipefail
+
           rm -f failure-context.txt
 
-          git diff --quiet -- .github/workflows || {
-            git restore .github/workflows
-            echo "Gemini attempted to modify workflow files."
-            exit 1
-          }
+          echo "Proposed repair:"
+          git status --short
+          git diff --stat
+          git diff
 
-          git diff --quiet && {
-            echo "Gemini produced no repair."
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "::error::Gemini did not produce a repair."
             exit 1
-          }
+          fi
+
+      # ----------------------------------------------------------
+      # 7. Validate required application files
+      # ----------------------------------------------------------
+
+      - name: Validate Required Files
+        shell: bash
+        run: |
+          set -euo pipefail
 
           for file in index.html styles.css script.js; do
-            test -s "$file" || {
-              echo "$file is missing or empty"
+            if [ ! -s "$file" ]; then
+              echo "::error file=$file::$file is missing or empty."
               exit 1
-            }
+            fi
           done
 
-          grep -q "styles.css" index.html
-          grep -q "script.js" index.html
+          grep -q "styles.css" index.html || {
+            echo "::error file=index.html::styles.css is not referenced."
+            exit 1
+          }
+
+          grep -q "script.js" index.html || {
+            echo "::error file=index.html::script.js is not referenced."
+            exit 1
+          }
+
+          echo "Required file validation passed."
+
+      # ----------------------------------------------------------
+      # 8. Validate repaired HTML, CSS, JS and formatting
+      # ----------------------------------------------------------
+
+      - name: Validate Repaired Code
+        shell: bash
+        run: |
+          set -euo pipefail
 
           node --check script.js
 
@@ -124,10 +228,11 @@ jobs:
             stylelint@16 \
             stylelint-config-standard@39
 
-          printf '%s\n' \
-            'export default {' \
-            '  extends: ["stylelint-config-standard"]' \
-            '};' > stylelint.config.mjs
+          cat > stylelint.config.mjs <<'EOF'
+          export default {
+            extends: ["stylelint-config-standard"]
+          };
+          EOF
 
           npx html-validate index.html
           npx stylelint styles.css
@@ -139,29 +244,76 @@ jobs:
             package-lock.json \
             stylelint.config.mjs
 
-      - name: Commit Push and Create Pull Request
+          echo "Technical validation passed."
+
+      # ----------------------------------------------------------
+      # 9. Commit and push repair branch
+      # ----------------------------------------------------------
+
+      - name: Commit and Push Repair
         env:
-          GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.branch.outputs.name }}
-          FAILED_RUN: ${{ github.event.workflow_run.html_url }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "gemini-self-heal[bot]"
           git config user.email \
             "gemini-self-heal[bot]@users.noreply.github.com"
 
           git add --all
 
+          if git diff --cached --quiet; then
+            echo "::error::No validated repair remains to commit."
+            exit 1
+          fi
+
           git commit \
-            -m "fix: AI repair for failed deployment"
+            -m "fix: AI-generated repair for failed deployment"
 
           git push \
             --set-upstream origin "$BRANCH"
 
+      # ----------------------------------------------------------
+      # 10. Raise PR against self-healing
+      # ----------------------------------------------------------
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
           gh pr create \
-            --base main \
+            --base self-healing \
             --head "$BRANCH" \
             --title "AI self-heal: repair failed deployment" \
-            --body "Gemini analysed the failed run, applied a repair and passed the automated validation checks.
+            --body-file - <<EOF
+          ## AI-generated repair
 
-          Failed workflow:
-          $FAILED_RUN"
+          Gemini inspected the failed deployment logs, recent repository
+          changes and application files.
+
+          The proposed repair was created on an isolated branch before Gemini
+          modified any files.
+
+          ### Automated checks completed
+
+          - Required application files exist and are not empty
+          - HTML references CSS and JavaScript
+          - JavaScript syntax validation passes
+          - HTML validation passes
+          - CSS validation passes
+          - Formatting validation passes
+          - GitHub Actions workflow files were not modified
+
+          Failed deployment:
+
+          $FAILED_RUN_URL
+
+          Please review the generated changes before merging.
+          EOF
+          
