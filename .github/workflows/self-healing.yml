@@ -1,0 +1,148 @@
+name: Gemini Self Heal
+
+on:
+  workflow_run:
+    workflows:
+      - Deploy Quote Generator
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  repair:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout failed revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Create fix branch
+        id: branch
+        run: |
+          BRANCH="ai-fix-${{ github.event.workflow_run.id }}-${{ github.run_attempt }}"
+          git switch -c "$BRANCH"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Collect failure context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          {
+            echo "Failed workflow run: $FAILED_RUN_ID"
+            echo
+            echo "Recent commit:"
+            git show --stat --oneline HEAD
+            echo
+            echo "Recent changes:"
+            git diff HEAD^ HEAD || true
+            echo
+            echo "Changed files:"
+            git diff --name-status HEAD^ HEAD || true
+            echo
+            echo "Failed workflow logs:"
+            gh run view "$FAILED_RUN_ID" --log-failed || true
+          } > failure-context.txt
+
+      - name: Let Gemini investigate and repair
+        id: gemini
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          gemini_api_key: ${{ secrets.LLM_API_KEY }}
+          gemini_model: gemini-2.5-flash
+          prompt: |
+            You are operating as a cautious self-healing coding agent.
+
+            A GitHub Pages deployment or its health check failed.
+
+            Read failure-context.txt and inspect the entire checked-out repository.
+            Compare the current revision with its previous revision.
+            Identify the root cause yourself.
+
+            Make the smallest necessary changes directly in the working tree.
+            You may create, rename, edit, or delete project files when needed.
+
+            This is a static HTML, CSS, and JavaScript website deployed to
+            GitHub Pages.
+
+            Requirements:
+            - Do not edit anything under .github/workflows/.
+            - Do not expose or print secrets.
+            - Do not run destructive commands.
+            - Do not commit, push, or create a pull request.
+            - Do not merely explain the fix. Apply it to the working tree.
+            - Preserve the intended application behaviour and appearance.
+            - Stop without changing files if the cause cannot be determined safely.
+
+      - name: Show Gemini changes
+        run: |
+          git status --short
+          git diff --stat
+          git diff
+
+      - name: Verify a fix was produced
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "Gemini did not produce a safe code change."
+            exit 1
+          fi
+
+      - name: Validate repaired project
+        run: |
+          test -f index.html
+          test -f styles.css
+          test -f script.js
+          node --check script.js
+
+          grep -q 'styles.css' index.html
+          grep -q 'script.js' index.html
+
+          echo "Repair passed validation."
+
+      - name: Commit and push fix branch
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          git config user.name "gemini-self-heal[bot]"
+          git config user.email "gemini-self-heal[bot]@users.noreply.github.com"
+
+          git add --all
+          git commit -m "fix: AI-generated recovery for failed deployment"
+          git push --set-upstream origin "$BRANCH"
+
+      - name: Create pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "AI self-heal: repair failed deployment" \
+            --body-file - <<EOF
+          ## AI-generated repair
+
+          Gemini inspected the repository, recent changes, and failed workflow
+          logs, then modified the project in an isolated fix branch.
+
+          Failed workflow: $FAILED_RUN_URL
+
+          Automated validation performed:
+
+          - Required entry files exist
+          - JavaScript syntax check passes
+          - HTML references the CSS and JavaScript files
+
+          Please review the changes before merging.
+          EOF
+          
