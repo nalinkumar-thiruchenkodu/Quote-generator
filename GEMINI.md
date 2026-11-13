@@ -1,21 +1,23 @@
-# Repository instructions
+# Quote Generator repair instructions
 
-This repository contains a static GitHub Pages quote generator.
+This repository contains a static motivational quote website deployed to
+GitHub Pages.
 
-## Expected application structure
+## Application files
 
-- `index.html` is the website entry point.
-- `styles.css` contains the page styling.
-- `script.js` contains the quote generator behaviour.
+- `index.html` is the required website entry point.
+- `styles.css` contains the website styling.
+- `script.js` contains the quote list and quote-generator behaviour.
 
-## Repair policy
+## Repair rules
 
-When investigating a failed deployment:
-
-1. Inspect the failed workflow context and recent Git changes.
-2. Determine the root cause rather than assuming a particular failure.
+1. Read `failure-context.txt` before making changes.
+2. Inspect recent changes and determine the root cause.
 3. Make the smallest safe repair.
-4. Preserve the intended design and behaviour.
-5. Never edit GitHub Actions workflow files.
-6. Never commit directly to `main`.
-7. Never remove application functionality merely to make validation pass.
+4. Preserve the application's intended design and functionality.
+5. Preserve valid quotes.
+6. Quotes must be meaningful, motivational and classroom-appropriate.
+7. Do not modify files under `.github/workflows/`.
+8. Do not weaken or bypass validation.
+9. Do not commit directly to `main`.
+10. Do not delete unrelated application functionality.
