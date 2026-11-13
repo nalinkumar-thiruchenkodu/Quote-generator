@@ -1,2 +1,11 @@
+# Gemini CLI runtime files
 .gemini/
 gha-creds-*.json
+
+# Temporary AI validation files
+gemini-request.json
+gemini-response.json
+failure-context.txt
+
+# Temporary validator dependencies
+node_modules/
