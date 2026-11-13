@@ -29,11 +29,15 @@ jobs:
         uses: actions/deploy-pages@v4
 
       - name: Health Check
+        id: healthcheck
         env:
           SITE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
           CODE=$(curl -s -o /dev/null -w "%{http_code}" "$SITE_URL")
+
           echo "Status Code: $CODE"
+
+          echo "health_code=$CODE" >> $GITHUB_OUTPUT
 
           if [ "$CODE" != "200" ]; then
             echo "Health check failed"
