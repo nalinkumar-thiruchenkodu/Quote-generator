@@ -1,7 +1,7 @@
 name: Deploy Quote Generator
 
 on:
-  workflow_dispatch:
+  workflow_dispatch
 
 permissions:
   contents: read
@@ -25,5 +25,20 @@ jobs:
           path: .
 
       - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
-        
+
+      - name: Health Check
+        run: |
+          SITE_URL="https://<username>.github.io/<repo>/"
+
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "$SITE_URL")
+
+          echo "Status Code: $CODE"
+
+          if [ "$CODE" != "200" ]; then
+            echo "Health check failed"
+            exit 1
+          fi
+
+          echo "Site healthy"
