@@ -35,15 +35,15 @@ Deployment Failure
 → Human Review
 
 ---
-
-## Project Structure
-
-```text
+###Project atructure
 quote-generator/
 │
-├── index.html
-├── styles.css
-├── script.js
+├── app/
+│   │
+│   ├── index.html
+│   ├── styles.css
+│   └── script.js
+│
 ├── GEMINI.md
 ├── .gitignore
 ├── README.md
