@@ -1,55 +1,56 @@
 name: AI Self Heal
 
 on:
-
   workflow_run:
-
     workflows:
       - Deploy Quote Generator
-
     types:
       - completed
 
-
 permissions:
-
   actions: read
-
   contents: write
-
   pull-requests: write
-
 
 jobs:
 
   repair:
 
-    if: >
-      github.event.workflow_run.conclusion == 'failure' &&
-      github.event.workflow_run.head_branch == 'self-healing'
+    # Run for any failed Deploy Quote Generator workflow
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
 
     runs-on: ubuntu-latest
-
     timeout-minutes: 7
-
 
     steps:
 
-      # Checkout the exact failed revision
-      - name: Checkout Failed Revision
+      # -------------------------------------------------------
+      # 1. Checkout the exact commit that failed
+      # -------------------------------------------------------
 
+      - name: Checkout Failed Revision
         uses: actions/checkout@v4
 
         with:
-
           ref: ${{ github.event.workflow_run.head_sha }}
-
           fetch-depth: 2
 
 
-      # Create fix branch BEFORE Gemini
-      - name: Create Fix Branch
+      # -------------------------------------------------------
+      # 2. Remember which branch failed
+      # -------------------------------------------------------
 
+      - name: Show Failed Branch
+        run: |
+          echo "Failed branch: ${{ github.event.workflow_run.head_branch }}"
+          echo "Failed SHA: ${{ github.event.workflow_run.head_sha }}"
+
+
+      # -------------------------------------------------------
+      # 3. Create fix branch BEFORE Gemini
+      # -------------------------------------------------------
+
+      - name: Create Fix Branch
         id: branch
 
         run: |
@@ -60,8 +61,13 @@ jobs:
 
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
+          echo "Fix branch: $BRANCH"
 
-      # Collect failure information
+
+      # -------------------------------------------------------
+      # 4. Collect failure information
+      # -------------------------------------------------------
+
       - name: Collect Failure Context
 
         env:
@@ -75,7 +81,15 @@ jobs:
 
           {
 
+            echo "FAILED BRANCH:"
+
+            echo "${{ github.event.workflow_run.head_branch }}"
+
+
+            echo
+
             echo "FAILED WORKFLOW:"
+
 
             gh run view "$RUN_ID" \
               --log-failed 2>&1 |
@@ -93,7 +107,10 @@ jobs:
           } > failure-context.txt
 
 
-      # Gemini investigates application
+      # -------------------------------------------------------
+      # 5. Gemini diagnoses and repairs app/
+      # -------------------------------------------------------
+
       - name: Diagnose and Repair With Gemini
 
         env:
@@ -138,8 +155,8 @@ jobs:
 
             Inspect the relevant files inside app/.
 
-            Use the failed workflow information and recent Git changes
-            to determine why deployment failed.
+            Use the failed workflow logs and recent Git changes to
+            determine the actual cause of the failure.
 
             Make the smallest necessary repair.
 
@@ -163,12 +180,16 @@ jobs:
             - Do not weaken validation.
             - Do not expose secrets.
             - Do not install packages.
-            - Do not commit or push.
+            - Do not commit.
+            - Do not push.
             - Do not create a pull request.
             - Make one repair attempt and stop.
 
 
-      # Basic guardrails
+      # -------------------------------------------------------
+      # 6. Basic guardrails before commit
+      # -------------------------------------------------------
+
       - name: Validate AI Repair
 
         run: |
@@ -176,28 +197,18 @@ jobs:
           set -e
 
 
-          # Remove temporary AI files
+          # Remove Gemini temporary output
           rm -rf gemini-artifacts
 
           rm -f failure-context.txt
 
 
-          # Gemini must not change workflow files
+          # AI must never modify GitHub Actions workflows
           git diff --quiet -- .github/workflows || {
 
             git restore .github/workflows
 
-            echo "AI attempted to modify workflow files"
-
-            exit 1
-
-          }
-
-
-          # Something must have changed
-          [ -n "$(git status --porcelain)" ] || {
-
-            echo "AI produced no repair"
+            echo "::error::AI attempted to modify workflow files"
 
             exit 1
 
@@ -207,7 +218,17 @@ jobs:
           # Application folder must still exist
           [ -d "app" ] || {
 
-            echo "Application folder is missing"
+            echo "::error::Application folder is missing"
+
+            exit 1
+
+          }
+
+
+          # Gemini must have actually changed something
+          [ -n "$(git status --porcelain)" ] || {
+
+            echo "::error::AI produced no repair"
 
             exit 1
 
@@ -217,14 +238,19 @@ jobs:
           echo "AI repair passed basic validation"
 
 
-      # Commit + push + PR
+      # -------------------------------------------------------
+      # 7. Commit, push and PR back to THE FAILED BRANCH
+      # -------------------------------------------------------
+
       - name: Create Repair Pull Request
 
         env:
 
           GH_TOKEN: ${{ github.token }}
 
-          BRANCH: ${{ steps.branch.outputs.name }}
+          FIX_BRANCH: ${{ steps.branch.outputs.name }}
+
+          BASE_BRANCH: ${{ github.event.workflow_run.head_branch }}
 
           FAILED_RUN: ${{ github.event.workflow_run.html_url }}
 
@@ -234,7 +260,7 @@ jobs:
           set -euo pipefail
 
 
-          # Cleanup Gemini runtime files
+          # Clean runtime files
           rm -rf gemini-artifacts
 
           rm -f failure-context.txt
@@ -246,7 +272,7 @@ jobs:
             "gemini-self-heal[bot]@users.noreply.github.com"
 
 
-          # Stage all legitimate repo changes
+          # Stage legitimate repository changes
           git add --all
 
 
@@ -259,7 +285,12 @@ jobs:
           fi
 
 
-          echo "Repair changes:"
+          echo "Failed branch: $BASE_BRANCH"
+
+          echo "Fix branch: $FIX_BRANCH"
+
+
+          echo "Changes being committed:"
 
           git diff --cached --stat
 
@@ -269,16 +300,18 @@ jobs:
 
 
           git push \
-            -u origin "$BRANCH"
+            -u origin "$FIX_BRANCH"
 
 
           gh pr create \
-            --base self-healing \
-            --head "$BRANCH" \
+            --base "$BASE_BRANCH" \
+            --head "$FIX_BRANCH" \
             --title "AI Self Heal: Repair failed deployment" \
             --body "Gemini analysed the failed deployment and generated this repair.
 
-          Failed deployment:
+          Target branch:
+          $BASE_BRANCH
 
+          Failed deployment:
           $FAILED_RUN"
           
