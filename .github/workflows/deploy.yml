@@ -11,83 +11,114 @@ permissions:
 jobs:
 
   validate:
+
     name: Validate Application
+
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: app
 
     steps:
 
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Check required files
+
       - name: Validate Required Files
         run: |
+
           set -e
 
           for file in index.html styles.css script.js; do
 
             if [ ! -s "$file" ]; then
+
               echo "::error::$file is missing or empty"
+
               exit 1
+
             fi
 
           done
 
+
           grep -q "styles.css" index.html || {
+
             echo "::error::styles.css is not referenced"
+
             exit 1
+
           }
+
 
           grep -q "script.js" index.html || {
+
             echo "::error::script.js is not referenced"
+
             exit 1
+
           }
 
-          echo "Required files OK"
 
-      # Setup validation tools
+          echo "Required files validated"
+
+
       - name: Setup Node
         uses: actions/setup-node@v4
+
         with:
           node-version: "22"
 
-      # Validate syntax + formatting
-      - name: Validate Code
+
+      - name: Validate Source Code
         run: |
+
           set -e
+
 
           # JavaScript syntax
           node --check script.js
 
-          # Validation tools
+
+          # Install validators
           npm install --no-save \
             prettier@3 \
             html-validate@10 \
             stylelint@16 \
             stylelint-config-standard@39
 
+
+          # Stylelint configuration
           cat > stylelint.config.mjs <<'EOF'
           export default {
             extends: ["stylelint-config-standard"]
           };
           EOF
 
-          # HTML
+
+          # HTML validation
           npx html-validate index.html
 
-          # CSS
+
+          # CSS validation
           npx stylelint styles.css
 
-          # Formatting / indentation
+
+          # Formatting validation
           npx prettier --check \
             index.html \
             styles.css \
             script.js
 
+
           echo "Source validation successful"
 
 
+
   deploy:
+
     name: Deploy Application
 
     needs: validate
@@ -95,38 +126,50 @@ jobs:
     runs-on: ubuntu-latest
 
     environment:
+
       name: github-pages
+
       url: ${{ steps.deployment.outputs.page_url }}
+
 
     steps:
 
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Prepare Site
-        run: |
-          mkdir public
-          cp index.html styles.css script.js public/
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
 
+
       - name: Upload Website
         uses: actions/upload-pages-artifact@v3
+
         with:
-          path: public
+
+          path: app
+
 
       - name: Deploy to GitHub Pages
         id: deployment
+
         uses: actions/deploy-pages@v4
 
+
       - name: Production Health Check
+
         env:
+
           SITE_URL: ${{ steps.deployment.outputs.page_url }}
+
+
         run: |
+
           CODE="000"
 
+
           for ATTEMPT in 1 2 3; do
+
 
             CODE=$(curl \
               --silent \
@@ -135,17 +178,25 @@ jobs:
               --write-out "%{http_code}" \
               "$SITE_URL" || true)
 
+
             echo "Attempt $ATTEMPT: HTTP $CODE"
 
+
             if [ "$CODE" = "200" ]; then
+
               echo "Site is healthy"
+
               exit 0
+
             fi
+
 
             sleep 5
 
           done
 
+
           echo "::error::Health check failed with HTTP $CODE"
+
           exit 1
           

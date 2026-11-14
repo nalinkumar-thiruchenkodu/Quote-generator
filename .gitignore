@@ -1,4 +1,4 @@
-# Gemini CLI runtime files
+# Gemini CLI runtime
 .gemini/
 gemini-artifacts/
 gha-creds-*.json
@@ -6,5 +6,9 @@ gha-creds-*.json
 # Self-healing temporary files
 failure-context.txt
 
-# Validation dependencies
+# Node validation
 node_modules/
+
+# OS/editor files
+.DS_Store
+Thumbs.db

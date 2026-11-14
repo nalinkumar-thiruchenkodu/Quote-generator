@@ -1,37 +1,46 @@
 # Quote Generator AI Repair Instructions
 
-This repository contains a static motivational quote website deployed to
-GitHub Pages.
+This repository contains a static website deployed using GitHub Pages.
 
-## Application Files
+## Repository Structure
 
-- `index.html` is the website entry point.
-- `styles.css` contains the website styling.
-- `script.js` contains the quote list and application behaviour.
+Application source is located under:
 
-## AI Repair Instructions
+`app/`
 
-When a deployment fails:
+GitHub Actions workflows are located under:
+
+`.github/workflows/`
+
+## AI Repair Process
+
+When an application deployment fails:
 
 1. Read `failure-context.txt`.
-2. Inspect the failed workflow logs.
-3. Inspect the latest Git changes.
-4. Inspect the complete application.
+2. Inspect the failed validation information.
+3. Inspect recent changes under `app/`.
+4. Inspect relevant files under `app/`.
 5. Determine the actual root cause.
 6. Make the smallest safe repair.
 
-## Repair Rules
+## Allowed Changes
 
-- Preserve the application's intended design.
-- Preserve existing functionality.
-- Preserve valid quotes.
-- Quotes should be meaningful and classroom-appropriate.
-- Fix syntax errors when they are responsible for the failure.
-- Fix broken or missing file references.
-- Restore accidentally renamed or deleted required files when appropriate.
-- Fix formatting problems when validation requires it.
+The AI may:
 
-## Safety Rules
+- modify application files under `app/`
+- create application files under `app/` when necessary
+- rename application files under `app/` when necessary
+- remove application files under `app/` only when clearly required
+
+## Repair Principles
+
+- Preserve the application's intended behaviour.
+- Preserve the application's intended appearance.
+- Preserve valid application functionality.
+- Make the smallest change required to resolve the failure.
+- Prefer repairing the cause instead of bypassing the check.
+
+## Restrictions
 
 Never modify:
 
@@ -40,9 +49,10 @@ Never modify:
 Never:
 
 - weaken validation
-- remove validation to make the pipeline pass
-- expose credentials
-- commit directly to `main`
+- remove validation to make a pipeline pass
+- expose credentials or secrets
+- commit directly to the target branch
 - delete unrelated functionality
+- make speculative changes when the cause is unclear
 
-If the root cause cannot be determined safely, do not make speculative changes.
+If the root cause cannot be safely determined, leave the application unchanged.
